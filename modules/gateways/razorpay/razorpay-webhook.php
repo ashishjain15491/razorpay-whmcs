@@ -23,20 +23,7 @@ $gatewayParams = getGatewayVariables($gatewayModuleName);
 $api = new Api($gatewayParams['keyId'], $gatewayParams['keySecret']);
 
 /**
- * Process a Razorpay Webhook. We exit in the following cases:
- * - Successful processed
- * - Exception while fetching the payment
- *
- * It passes on the webhook in the following cases:
- * - invoice_id set in payment.authorized
- * - order refunded
- * - Invalid JSON
- * - Signature mismatch
- * - Secret isn't setup
- * - Event not recognized
- *
- * @return void|WP_Error
- * @throws Exception
+ * Process a Razorpay Webhook.
  */
 
 $post = file_get_contents('php://input');
@@ -57,9 +44,6 @@ if ($enabled === 'on' and
     {
         $razorpayWebhookSecret = $gatewayParams['webhookSecret'];
 
-        //
-        // If the webhook secret isn't set on wordpress, return
-        //
         if (empty($razorpayWebhookSecret) === true)
         {
             return;
@@ -82,14 +66,13 @@ if ($enabled === 'on' and
             logTransaction($gatewayParams["name"], $log, "Unsuccessful-".$e->getMessage());
 
             header('HTTP/1.1 401 Unauthorized', true, 401);
-
             return;
         }
 
         switch ($data['event'])
         {
             case ORDER_PAID:
-                return orderPaid($data, $gatewayParams);
+                return orderPaid($data, $gatewayParams, $gatewayModuleName);
 
             default:
                 return;
@@ -102,63 +85,68 @@ if ($enabled === 'on' and
  * Order Paid webhook
  *
  * @param array $data
+ * @param array $gatewayParams
+ * @param string $gatewayModuleName
  */
-function orderPaid(array $data, $gatewayParams)
+function orderPaid(array $data, $gatewayParams, $gatewayModuleName)
 {
-    // We don't process subscription/invoice payments here
-    if (isset($data['payload']['payment']['entity']['invoice_id']) === true)
+    // We don't process subscription/invoice payments here if invoice_id is set in payment entity
+    // (This usually indicates a subscription payment, handled differently)
+    if (isset($data['payload']['payment']['entity']['invoice_id']) === true && !empty($data['payload']['payment']['entity']['invoice_id']))
     {
-        logTransaction($gatewayParams['name'], "returning order.paid webhook", "Invoice ID exists");
+        logTransaction($gatewayParams['name'], "returning order.paid webhook", "Invoice ID (Subscription) exists");
         return;
     }
 
     //
     // Order entity should be sent as part of the webhook payload
+    // 'whmcs_order_id' here actually refers to the WHMCS Invoice ID (as set in rzpordermapping/creation)
     //
-    $orderId = $data['payload']['order']['entity']['notes']['whmcs_order_id'];
+    $invoiceId = $data['payload']['order']['entity']['notes']['whmcs_order_id'];
     $razorpayPaymentId = $data['payload']['payment']['entity']['id'];
 
     // Validate Callback Invoice ID.
-    $merchant_order_id = checkCbInvoiceID($orderId, $gatewayParams['name']);
+    $invoiceId = checkCbInvoiceID($invoiceId, $gatewayParams['name']);
     
     // Check Callback Transaction ID.
+    // If the Callback script ran first, this will stop here.
     checkCbTransID($razorpayPaymentId);
 
-    $orderTableId = mysql_fetch_assoc(select_query('tblorders', 'id', array("invoiceid"=>$orderId)));
+    // Fetch Invoice to verify amount
+    $invoice = mysql_fetch_assoc(select_query('tblinvoices', '*', array("id"=>$invoiceId)));
 
-    $command = 'GetOrders';
+    if (!$invoice) {
+        logTransaction($gatewayParams['name'], "Invoice not found for ID: $invoiceId", "Failure");
+        return;
+    }
 
-    $postData = array(
-        'id' => $orderTableId['id'],
-    );
-
-    $order = localAPI($command, $postData);
-
-    // If order detail not found then ignore.
-    // If it is already marked as paid or failed ignore the event
-    if($order['totalresults'] == 0 or $order['orders']['order'][0]['paymentstatus'] === 'Paid')
+    // Check if already paid
+    if($invoice['status'] === 'Paid')
     {
-        logTransaction($gatewayParams['name'], "order detail not found or already paid or failed", "INFO");
+        logTransaction($gatewayParams['name'], "Invoice $invoiceId already paid", "INFO");
         return;
     }
 
     $success = false;
     $error = "";
-    $error = 'The payment has failed.';
 
-    $amount = getOrderAmountAsInteger($order);
+    // Amount verification
+    // Razorpay sends amount in paise (integer). WHMCS is in currency units (float).
+    $razorpayAmount = $data['payload']['payment']['entity']['amount']; // Integer (e.g., 10000 for 100.00)
+    $whmcsAmount = (int) round($invoice['total'] * 100); // Convert WHMCS total to paise
 
-    if($data['payload']['payment']['entity']['amount'] === $amount)
+    // Allow a small buffer for float precision issues (optional, but strict equality is usually fine here)
+    if($razorpayAmount === $whmcsAmount)
     {
         $success = true;
     }
     else
     {
-        $error = 'WHMCS_ERROR: Payment to Razorpay Failed. Amount mismatch.';
+        $error = "WHMCS_ERROR: Amount mismatch. Invoice: $whmcsAmount, Razorpay: $razorpayAmount";
     }
 
     $log = [
-        'merchant_order_id'   => $orderId,
+        'merchant_order_id'   => $invoiceId,
         'razorpay_payment_id' => $razorpayPaymentId,
         'webhook' => true
     ];
@@ -166,31 +154,28 @@ function orderPaid(array $data, $gatewayParams)
     if ($success === true)
     {
         # Successful
-        # Apply Payment to Invoice: invoiceid, transactionid, amount paid, fees, modulename
-        $orderAmount=$order['orders']['order'][0]['amount'];
         
-        addInvoicePayment($orderId, $razorpayPaymentId, $orderAmount, 0, $gatewayParams["name"]);
-        logTransaction($gatewayParams["name"], $log, "Successful"); # Save to Gateway Log: name, data array, status
+        // 1. Calculate Fees from Webhook Payload
+        // Razorpay sends fee in the webhook payload, so we don't need an API call.
+        $feeAmount = 0;
+        if (isset($data['payload']['payment']['entity']['fee'])) {
+            // Fee is in paise, convert to standard unit
+            $feeAmount = $data['payload']['payment']['entity']['fee'] / 100;
+        }
+
+        # Apply Payment to Invoice: invoiceid, transactionid, amount paid, fees, modulename
+        // Note: We use the Invoice Total, not the Razorpay amount, to avoid penny rounding issues in WHMCS
+        addInvoicePayment($invoiceId, $razorpayPaymentId, $invoice['total'], $feeAmount, $gatewayModuleName);
+        
+        logTransaction($gatewayParams["name"], $log, "Successful"); 
     }
     else
     {
         # Unsuccessful
-        # Save to Gateway Log: name, data array, status
-        logTransaction($gatewayParams["name"], $log, "Unsuccessful-".$error . ". Please check razorpay dashboard for Payment id: ".$razorpayPaymentId);
+        logTransaction($gatewayParams["name"], $log, "Unsuccessful-".$error);
     }
 
-    // Graceful exit since payment is now processed.
+    // Graceful exit
     exit;
 }
-
-/**
- * Returns the order amount, rounded as integer
- * @param WHMCS_Order $order WHMCS Order instance
- * @return int Order Amount
- */
-function getOrderAmountAsInteger($order)
-{
-    return (int) round($order['orders']['order'][0]['amount'] * 100);
-}
-
 ?>

@@ -42,13 +42,15 @@ $merchant_order_id = checkCbInvoiceID($merchant_order_id, $gatewayParams['name']
 # Fetch invoice to get the amount and userid
 $result = mysql_fetch_assoc(select_query('tblinvoices', '*', array("id"=>$merchant_order_id)));
 
-#check whether order is already paid or not, if paid then redirect to complete page
+# check whether order is already paid or not, if paid then redirect to complete page
 if($result['status'] === 'Paid')
 {
-    header("Location: ".$gatewayParams['systemurl']."/viewinvoice.php?id=" . $merchant_order_id); // nosemgrep : php.lang.security.non-literal-header.non-literal-header
-    
+    header("Location: ".$gatewayParams['systemurl']."/viewinvoice.php?id=" . $merchant_order_id); 
     exit;
 }
+
+# Check if this specific transaction ID was already processed (Prevents duplicates)
+checkCbTransID($razorpay_payment_id);
 
 $amount = $result['total'];
 
@@ -56,11 +58,24 @@ $error = "";
 
 try
 {
+    // 1. Verify Signature
     verifySignature($merchant_order_id, $_POST, $gatewayParams);
 
+    // 2. Safely Fetch Fees
+    // We wrap this in a separate try/catch so if the API fails, the payment still succeeds.
+    $feeAmount = 0;
+    try {
+        $feeAmount = getfeeAmount($razorpay_payment_id, $gatewayParams);
+    } catch (\Exception $e) {
+        // Log the fee error but DO NOT stop the script. 
+        // We proceed with 0 fees so the invoice is marked Paid.
+        logTransaction($gatewayParams["name"], "Fee Fetch Warning (Ignored): " . $e->getMessage(), "Warning");
+        $feeAmount = 0;
+    }
+    
     # Successful
     # Apply Payment to Invoice: invoiceid, transactionid, amount paid, fees, modulename
-    addInvoicePayment($merchant_order_id, $razorpay_payment_id, $amount, 0, $gatewayParams["name"]);
+    addInvoicePayment($merchant_order_id, $razorpay_payment_id, $amount, $feeAmount, $gatewayModuleName);
 
     logTransaction($gatewayParams["name"], $_POST, "Successful"); # Save to Gateway Log: name, data array, status
 }
@@ -72,8 +87,15 @@ catch (Errors\SignatureVerificationError $e)
     # Save to Gateway Log: name, data array, status
     logTransaction($gatewayParams["name"], $_POST, "Unsuccessful-".$error . ". Please check razorpay dashboard for Payment id: ".$_POST['razorpay_payment_id']);
 }
+catch (\Exception $e)
+{
+    # Global Catch-All
+    # Catches generic errors to prevent white-screen crashes
+    $error = 'WHMCS_ERROR: General Exception. ' . $e->getMessage();
+    logTransaction($gatewayParams["name"], $_POST, "Unsuccessful-".$error);
+}
 
-header("Location: ".$gatewayParams['systemurl']."/viewinvoice.php?id=" . $merchant_order_id); // nosemgrep : php.lang.security.non-literal-header.non-literal-header
+header("Location: ".$gatewayParams['systemurl']."/viewinvoice.php?id=" . $merchant_order_id); 
 
 /**
 * @codeCoverageIgnore
@@ -88,7 +110,7 @@ function getApiInstance($key,$keySecret)
  * @param  int $order_no
  * @param  array $response
  * @param  array $gatewayParams
- * @return
+ * @return void
  */
 function verifySignature(int $order_no, array $response, $gatewayParams)
 {
@@ -130,4 +152,27 @@ function verifySignature(int $order_no, array $response, $gatewayParams)
 
     $attributes[RAZORPAY_ORDER_ID] = $razorpayOrderId;
     $api->utility->verifyPaymentSignature($attributes);
+}
+
+/**
+ * Get fee amount from razorpay payment id
+ * @param  string $razorpayPaymentId
+ * @param  array $gatewayParams
+ * @return float
+ */
+function getfeeAmount(string $razorpayPaymentId, $gatewayParams)
+{
+    $api = getApiInstance($gatewayParams['keyId'], $gatewayParams['keySecret']);
+    $payment = $api->payment->fetch($razorpayPaymentId);
+    
+    // Fee is in paise, convert to currency unit
+    $feeAmount = 0;
+    
+    // Check if fee is set and positive
+    if (isset($payment->fee) && $payment->fee > 0) {
+        // Razorpay 'fee' includes the tax component already.
+        $feeAmount = $payment->fee / 100;
+    }
+    
+    return $feeAmount;
 }

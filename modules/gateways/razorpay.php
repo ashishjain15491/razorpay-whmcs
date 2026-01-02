@@ -26,7 +26,7 @@ if (!defined("WHMCS")) {
  * @return array
  */
 function razorpay_MetaData()
-{
+{   
     return array(
         'DisplayName' => 'Razorpay',
         'APIVersion' => '1.1',
@@ -86,6 +86,42 @@ function razorpay_config()
                 AUTHORIZE => 'Authorize',
             ),
             'Description' => 'Payment action on order compelete.',
+            ),
+        'paymentOptions_Card' => array(
+            'FriendlyName' => 'Card Payment Options',
+            'Type' => 'yesno',
+            'Size' => '50',
+            'Description' => 'Select to enable Card Payment Options.',
+        ),
+        'paymentOptions_UPI' => array(
+            'FriendlyName' => 'UPI Payment Options',
+            'Type' => 'yesno',
+            'Size' => '50',
+            'Description' => 'Select to enable UPI Payment Options.',
+        ),
+        'paymentOptions_Netbanking' => array(
+            'FriendlyName' => 'Netbanking Payment Options',
+            'Type' => 'yesno',
+            'Size' => '50',
+            'Description' => 'Select to enable Netbanking Payment Options.',
+        ),
+        'paymentOptions_Wallets' => array(
+            'FriendlyName' => 'Wallets Payment Options',
+            'Type' => 'yesno',
+            'Size' => '50',
+            'Description' => 'Select to enable Wallets Payment Options.',
+        ),
+        'paymentOptions_EMI' => array(
+            'FriendlyName' => 'EMI Payment Options',
+            'Type' => 'yesno',
+            'Size' => '50',
+            'Description' => 'Select to enable EMI Payment Options.',
+        ), 
+        'paymentOptions_paylater' => array(
+            'FriendlyName' => 'Paylater Payment Options',
+            'Type' => 'yesno',
+            'Size' => '50',
+            'Description' => 'Select to enable Paylater Payment Options.',
         ),
         'enableWebhook' => array(
             'FriendlyName' => 'Enable Webhook',
@@ -207,6 +243,12 @@ function razorpay_link($params)
 {
     // Gateway Configuration Parameters
     $keyId = $params['keyId'];
+    $cardPaymentOption = $params['paymentOptions_Card'] == 'on' ? "true" : "false";
+    $upiPaymentOption = $params['paymentOptions_UPI'] == 'on' ? "true" : "false";
+    $netbankingPaymentOption = $params['paymentOptions_Netbanking'] == 'on' ? "true" : "false";
+    $walletPaymentOption = $params['paymentOptions_Wallets'] == 'on' ? "true" : "false";
+    $emiPaymentOption = $params['paymentOptions_EMI'] == 'on' ? "true" : "false";
+    $paylaterPaymentOption = $params['paymentOptions_paylater'] == 'on' ? "true" : "false";
 
     // Invoice Parameters
     $invoiceId = $params['invoiceid'];
@@ -264,6 +306,13 @@ function razorpay_link($params)
         data-currency       = "$currencyCode"
         data-order_id       = "$razorpayOrderId"
         data-description    = "Inv#$invoiceId"
+
+        data-method.card       = "$cardPaymentOption"
+        data-method.upi        = "$upiPaymentOption"
+        data-method.wallet    = "$walletPaymentOption"
+        data-method.netbanking = "$netbankingPaymentOption"
+        data-method.emi       = "$emiPaymentOption"
+        data-method.paylater  = "$paylaterPaymentOption"
 
         data-prefill.name   = "$name"
         data-prefill.email  = "$email"

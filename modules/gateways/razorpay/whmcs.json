@@ -1,0 +1,24 @@
+{
+    "schema": "1.0",
+    "type": "whmcs-gateways",
+    "name": "razorpay",
+    "license": "proprietary",
+    "category": "payments",
+    "description": {
+        "name": "Razorpay",
+        "tagline": "Accept digital payments with Razorpay payment gateway."
+    },
+    "logo": {
+        "filename": "logo.png"
+    },
+    "support": {
+        "homepage": "https:\/\/razorpay.com\/",
+        "docs_url": "https:\/\/razorpay.com\/docs\/"
+    },
+    "authors": [
+        {
+            "name": "Relyweb",
+            "homepage": "https:\/\/relyweb.co\/"
+        }
+    ]
+}
